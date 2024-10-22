@@ -353,7 +353,7 @@ if __name__ == "__main__":
 
     
     # Export to CSV
-    csv_path = "./data/documents.csv"
+    csv_path = "./data_folder/documents.csv"
     export_docs_to_csv(
         docs=filtered_chunks,
         output_path=csv_path,
