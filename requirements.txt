@@ -1,0 +1,12 @@
+tiktoken
+requests
+groq
+pandas
+numpy
+scikit-learn
+python-dotenv
+ipykernel
+markdownify
+langchain
+langchain-community
+langchain_text_splitters
