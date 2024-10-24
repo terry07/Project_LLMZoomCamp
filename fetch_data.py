@@ -1,6 +1,6 @@
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import numpy as np
 from git import Repo
 import os
@@ -9,7 +9,8 @@ import tiktoken
 import shutil
 import pandas as pd
 import json
-
+import re
+from tqdm import tqdm
 
 
 
@@ -64,7 +65,6 @@ class ReadmeChunker:
         # Create fresh directory
         os.makedirs(target_dir, exist_ok=True)
 
-
         logging.info(f"Cloning repository: {repo_url}")
         Repo.clone_from(repo_url, target_dir)
         return target_dir
@@ -85,6 +85,85 @@ class ReadmeChunker:
                 if file.lower().startswith('readme.') and file.lower().endswith(('.md', '.txt')):
                     readme_files.append(os.path.join(root, file))
         return readme_files
+
+    def find_md_files(self, repo_path: str) -> List[str]:
+        """
+        Find all .md files in the repository.
+        
+        Args:
+            repo_path (str): Path to the repository
+            
+        Returns:
+            List[str]: List of paths to README files
+        """
+        md_files = []
+        for root, _, files in os.walk(repo_path):
+            for file in files:
+                if file.lower().endswith(('.md', '.txt')):
+                    md_files.append(os.path.join(root, file))
+        return md_files
+    
+    def remove_image_tags(self, markdown_content):
+        # Regular expression to remove image tags
+        image_pattern = r'!\[.*?\]\(.*?\)'
+        cleaned_content = re.sub(image_pattern, '', markdown_content)
+
+        return cleaned_content
+
+    def remove_references_section(self, markdown_content):
+        # Regular expression to remove everything under '## References'
+        references_pattern = r'## References[\s\S]*'
+        cleaned_content = re.sub(references_pattern, '', markdown_content)
+        return cleaned_content
+
+    def remove_links_but_keep_anchor_text(self, markdown_content):
+        # Regular expression to replace links with just the anchor text
+        link_pattern = r'\[([^\]]+)\]\(http[^\)]+\)'
+        cleaned_content = re.sub(link_pattern, r'\1', markdown_content)
+        return cleaned_content
+
+
+    def remove_toc_pattern(self, markdown_content):
+        # Regular expression to remove the specific toc pattern
+        toc_pattern = r'\*\s\*\s\*\n\n\\\[toc\\\]\n\n\*\s\*\s\*'
+        cleaned_content = re.sub(toc_pattern, '', markdown_content)
+        return cleaned_content
+
+    def remove_bold_formatting(self, markdown_content):
+        # Regular expression to remove ** from bold formatting
+        bold_pattern = r'\*\*(.*?)\*\*'
+        cleaned_content = re.sub(bold_pattern, r'\1', markdown_content)
+        return cleaned_content
+
+    def remove_content_after_phrase(sel, markdown_content, phrase_pattern):
+        # Regular expression to remove content after the specified phrase
+        cleaned_content = re.sub(phrase_pattern, '', markdown_content)
+        return cleaned_content
+
+
+    def clean_markdown_file(self, markdown_content):
+        
+
+        # Remove content under '## References'
+        cleaned_content = self.remove_references_section(markdown_content)
+
+        # Remove links but keep anchor text
+        cleaned_content = self.remove_links_but_keep_anchor_text(cleaned_content)
+
+        # Remove image tags
+        cleaned_content = self.remove_image_tags(cleaned_content)
+
+        # Remove the specific toc pattern
+        cleaned_content = self.remove_toc_pattern(cleaned_content)
+
+        # Remove bold formatting
+        cleaned_content = self.remove_bold_formatting(cleaned_content)
+
+        # Remove content after the specified phrase
+        cleaned_content = self.remove_content_after_phrase(cleaned_content, r'If you have any questions, please[\s\S]*')
+        cleaned_content = self.remove_content_after_phrase(cleaned_content, r'Ask a question[\s\S]*')
+
+        return cleaned_content
 
     def process_readme(self, file_path: str, target_dir: str) -> Document:
         """
@@ -112,6 +191,84 @@ class ReadmeChunker:
             metadata['directory'] = 'main page'
         elif metadata['directory'].startswith('-'):
             metadata['directory'] = metadata['directory'][1:]
+        
+        return Document(page_content=content, metadata=metadata)
+    
+    def parse_frontmatter(self, text: str) -> Dict[str, str]:
+        """
+        Parse frontmatter-style text and extract title, categories, and tags.
+        Concatenates list items with spaces.
+        
+        Args:
+            text (str): The frontmatter text to parse
+            
+        Returns:
+            Dict[str, str]: Dictionary containing title, categories, and tags
+        """
+        # Initialize result dictionary
+        result = {
+            'title': '',
+            'categories': '',
+            'tags': ''
+        }
+        
+        # Remove quotes from title
+        title_match = re.search(r'title:\s*"([^"]*)"', text)
+        if title_match:
+            result['title'] = title_match.group(1).strip()
+        
+        # Extract categories
+        categories_match = re.search(r'categories:(.*?)(?=tags:|---)', text, re.DOTALL)
+        if categories_match:
+            # Extract items between quotes after dashes
+            categories = re.findall(r'-\s*"([^"]*)"', categories_match.group(1))
+            result['categories'] = ' '.join(categories)
+        
+        # Extract tags
+        tags_match = re.search(r'tags:(.*)$', text, re.DOTALL)
+        if tags_match:
+            # Extract items between quotes after dashes
+            tags = re.findall(r'-\s*"([^"]*)"', tags_match.group(1))
+            result['tags'] = ' '.join(tags)
+        
+        return result
+
+
+    def process_md(self, file_path: str, target_dir: str) -> Document:
+        """
+        Process a single md file into a Document with metadata.
+        
+        Args:
+            file_path (str): Path to the README file
+            target_dir (str): Path of the cloned project
+            
+        Returns:
+            Document: LangChain Document with content and metadata
+        """
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        st = content.split('---\n\n')[0]
+        result = self.parse_frontmatter(st)
+
+            
+        # Extract metadata
+        metadata = {
+            'filename': os.path.basename(file_path),
+            'directory': os.path.dirname(file_path).split(f"{target_dir}")[1].replace('/', '-'),
+            'file_type': os.path.splitext(file_path)[1],
+            'size': token_length(content),
+            'title': result['title'],
+            'categories': result['categories'],
+            'tags': result['tags']
+        }
+
+        if metadata['directory'] == '':
+            metadata['directory'] = 'main page'
+        elif metadata['directory'].startswith('-'):
+            metadata['directory'] = metadata['directory'][1:]
+
+        content = self.clean_markdown_file(content.split('---\n\n')[1])
         
         return Document(page_content=content, metadata=metadata)
 
@@ -159,12 +316,24 @@ class ReadmeChunker:
         repo_path = self.clone_repo(repo_url, target_dir)
         
         # Find all README files
-        readme_files = self.find_readme_files(repo_path)
+        files = self.find_md_files(repo_path)
+
         all_chunks = []
         
         # Process each README file
-        for file_path in readme_files:
-            doc = self.process_readme(file_path, target_dir)
+        for file_path in tqdm(files):
+            #doc = self.process_readme(file_path, target_dir)
+
+            with open(file_path, 'r', encoding='utf-8') as file:
+                markdown_content = file.read()
+            
+            if len(markdown_content.split('---\n\n')) != 2:
+                print(file_path)
+                continue
+
+            doc = self.process_md(file_path, target_dir)
+
+            
             chunks = self.chunk_document(doc)
             all_chunks.extend(chunks)
             
@@ -190,7 +359,6 @@ class ReadmeChunker:
         removed_count = 0
         
         for chunk in chunks:
-            
             
             if target not in chunk.metadata['filename']:        
                 filtered_chunks.append(chunk)
@@ -332,17 +500,18 @@ if __name__ == "__main__":
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     
-    chunker = ReadmeChunker(chunk_size=2_000, chunk_overlap=250)
+    chunker = ReadmeChunker(chunk_size=5_000, chunk_overlap=250)
 
     # Example repository URL and target directory
-    repo_url = "https://github.com/microsoft/AI-For-Beginners"
+    #repo_url = "https://github.com/microsoft/AI-For-Beginners"
+    repo_url = "https://github.com/christianversloot/machine-learning-articles"
     target_dir = "./target_repo"
     
-    chunks = chunker.process_repository(repo_url, target_dir)
+    filtered_chunks = chunker.process_repository(repo_url, target_dir)
 
     # remove chunks related to translation pages
-    filtered_chunks = chunker.filter_chunks(chunks, '.ja.')
-    logging.info(f"Number of kept docs: {len(filtered_chunks)}.")
+    #filtered_chunks = chunker.filter_chunks(chunks, '.ja.')
+    #logging.info(f"Number of kept docs: {len(filtered_chunks)}.")
 
     # Print example chunk with metadata
     for chunk in filtered_chunks[0:1]:
